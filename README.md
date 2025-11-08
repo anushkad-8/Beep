@@ -1,3 +1,7 @@
+Making this as part of my Computer Networks project for sem 5. Will later publish it too. 
+Author: Anushka Dabhade
+Read the important starter details below. Thanks!
+
 Office Meetings Platform (with Mediasoup SFU) - Starter Repo
 ============================================================
 
