@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as mediasoupClient from "mediasoup-client";
 import API from "../api/api";
-import { X, Mic, MicOff, Video, VideoOff, Users } from "lucide-react";
+import { X, Mic, MicOff, Video, VideoOff, PhoneOff } from "lucide-react";
 
 export default function MeetingRoomModal({ socket, me, onClose }) {
-  const roomId = "team-room"; // static for now
+  const roomId = "team-room";
   const localVideoRef = useRef(null);
   const [device, setDevice] = useState(null);
   const [sendTransport, setSendTransport] = useState(null);
@@ -14,38 +14,60 @@ export default function MeetingRoomModal({ socket, me, onClose }) {
   const [muted, setMuted] = useState(false);
   const [camOff, setCamOff] = useState(false);
 
-  // 🔁 Socket event listeners
+  // 🔁 Socket listeners
   useEffect(() => {
     if (!socket) return;
 
-    socket.on("room:peer-joined", async () => {
-      console.log("👥 Peer joined, fetching producers...");
-      await fetchProducers();
+    socket.on("room:peer-joined", () => {
+      console.log("👥 Peer joined, refreshing producers...");
+      fetchProducers();
     });
 
-    socket.on("room:peer-left", async () => {
+    socket.on("room:peer-left", () => {
       console.log("👋 Peer left, refreshing producers...");
-      await fetchProducers();
+      fetchProducers();
     });
 
     return () => {
       socket.off("room:peer-joined");
       socket.off("room:peer-left");
     };
-  }, [socket, device, recvTransport]);
+  }, [socket]);
 
-  // 🚀 Join Meeting
-  async function join() {
-    console.log("🚀 Joining meeting...");
+  // 🔄 Attach remote video streams dynamically
+  useEffect(() => {
+    Object.entries(remoteStreams).forEach(([peerId, stream]) => {
+      const videoEl = document.getElementById(`remote-${peerId}`);
+      if (videoEl && !videoEl.srcObject) {
+        videoEl.srcObject = stream;
+      }
+    });
+  }, [remoteStreams]);
+
+  async function fetchProducers() {
     try {
-      // 1️⃣ Load router RTP capabilities
+      const res = await API.get(`/mediasoup/rooms/${roomId}/producers`);
+      console.log("🎯 Fetched producers:", res.data);
+      for (const p of res.data || []) {
+        if (p.peerId !== socket.id) {
+          await consumeTrack(p);
+        }
+      }
+    } catch (err) {
+      console.error("❌ Failed to fetch producers:", err);
+    }
+  }
+
+  async function join() {
+    try {
+      console.log("🚀 Joining meeting...");
       const { data } = await API.get(`/mediasoup/rooms/${roomId}/rtpCapabilities`);
       const dev = new mediasoupClient.Device();
       await dev.load({ routerRtpCapabilities: data.rtpCapabilities });
       setDevice(dev);
       console.log("✅ Device loaded");
 
-      // 2️⃣ Create Send Transport
+      // --- Send transport ---
       const sendParams = (await API.post(`/mediasoup/rooms/${roomId}/create-transport`)).data;
       const sendT = dev.createSendTransport(sendParams);
 
@@ -57,9 +79,8 @@ export default function MeetingRoomModal({ socket, me, onClose }) {
             peerId: socket.id,
           });
           callback();
-        } catch (err) {
-          console.error("❌ Send transport connect failed:", err);
-          errback(err);
+        } catch (e) {
+          errback(e);
         }
       });
 
@@ -72,14 +93,13 @@ export default function MeetingRoomModal({ socket, me, onClose }) {
             peerId: socket.id,
           });
           callback({ id: res.data.id });
-        } catch (err) {
-          console.error("❌ Produce failed:", err);
-          errback(err);
+        } catch (e) {
+          errback(e);
         }
       });
       setSendTransport(sendT);
 
-      // 3️⃣ Create Recv Transport
+      // --- Recv transport ---
       const recvParams = (await API.post(`/mediasoup/rooms/${roomId}/create-transport`)).data;
       const recvT = dev.createRecvTransport(recvParams);
 
@@ -91,87 +111,71 @@ export default function MeetingRoomModal({ socket, me, onClose }) {
             peerId: socket.id,
           });
           callback();
-        } catch (err) {
-          console.error("❌ Recv transport connect failed:", err);
-          errback(err);
+        } catch (e) {
+          errback(e);
         }
       });
       setRecvTransport(recvT);
 
-      // 4️⃣ Capture local media
+      // --- Local stream ---
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       console.log("🎥 Local media captured");
 
-      // ✅ Wait for ref to be ready
-      let attempts = 0;
-      while (!localVideoRef.current && attempts < 10) {
-        await new Promise((r) => setTimeout(r, 100));
-        attempts++;
+      for (const track of stream.getTracks()) {
+        await sendT.produce({ track });
       }
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        console.log("✅ Local video stream attached");
-      } else {
-        console.warn("⚠️ Video element not ready; skipping attach");
-      }
-
-      // 5️⃣ Produce local tracks
-      for (const track of stream.getTracks()) await sendT.produce({ track });
       console.log("✅ Local tracks produced");
 
-      // 6️⃣ Join the room
       socket.emit("join_room", { roomId });
       setJoined(true);
-      console.log("📡 Joined room");
 
-      // 7️⃣ Fetch and consume existing producers
-      await fetchProducers(dev, recvT);
+      await fetchProducers();
+      console.log("📡 Joined room");
     } catch (err) {
       console.error("❌ Join meeting failed:", err);
     }
   }
 
-  // 🔄 Fetch all active producers in the room
-  async function fetchProducers(dev = device, recvT = recvTransport) {
-    if (!dev || !recvT) return;
-    try {
-      const res = await API.get(`/mediasoup/rooms/${roomId}/producers`);
-      console.log("🎯 Fetched producers:", res.data);
-      for (const p of res.data || []) {
-        if (p.peerId !== socket.id) await consumeTrack(p, dev, recvT);
-      }
-    } catch (err) {
-      console.error("❌ Failed to fetch producers:", err);
-    }
-  }
-
-  // 📥 Consume remote producer streams
-  async function consumeTrack(p, dev, recvT) {
+  async function consumeTrack(p) {
     try {
       console.log("📥 Consuming track from:", p.peerId);
       const { data } = await API.post(`/mediasoup/rooms/${roomId}/consume`, {
-        transportId: recvT.id,
+        transportId: recvTransport?.id,
         producerId: p.id,
-        rtpCapabilities: dev.rtpCapabilities,
+        rtpCapabilities: device?.rtpCapabilities,
         peerId: socket.id,
       });
 
-      const consumer = await recvT.consume({
+      if (!data || !data.id) {
+        console.warn("⚠️ Invalid consumer response:", data);
+        return;
+      }
+
+      const consumer = await recvTransport.consume({
         id: data.id,
         producerId: data.producerId,
         kind: data.kind,
         rtpParameters: data.rtpParameters,
       });
 
-      const stream = new MediaStream([consumer.track]);
+      const stream = new MediaStream();
+      stream.addTrack(consumer.track);
+
+      // Wait for DOM render before attaching
+      setTimeout(() => {
+        const videoEl = document.getElementById(`remote-${p.peerId}`);
+        if (videoEl) videoEl.srcObject = stream;
+        else console.warn("⚠️ Remote video element not found for:", p.peerId);
+      }, 300);
+
       setRemoteStreams((prev) => ({ ...prev, [p.peerId]: stream }));
-      console.log("✅ Remote stream added for", p.peerId);
+      console.log(`✅ Consumed ${data.kind} track from ${p.peerId}`);
     } catch (err) {
       console.error("❌ Consume failed:", err);
     }
   }
 
-  // 🎙 Toggle mic
   function toggleMic() {
     const track = localVideoRef.current?.srcObject?.getAudioTracks()[0];
     if (track) {
@@ -180,7 +184,6 @@ export default function MeetingRoomModal({ socket, me, onClose }) {
     }
   }
 
-  // 🎥 Toggle camera
   function toggleCam() {
     const track = localVideoRef.current?.srcObject?.getVideoTracks()[0];
     if (track) {
@@ -189,88 +192,94 @@ export default function MeetingRoomModal({ socket, me, onClose }) {
     }
   }
 
-  // 🚪 Leave meeting
   function leaveMeeting() {
     socket.emit("leave_room", { roomId });
     setJoined(false);
+    setRemoteStreams({});
     onClose();
   }
 
-  // 🧱 Determine grid layout
-  const participantCount = 1 + Object.keys(remoteStreams).length;
-  const gridCols = participantCount <= 2 ? "grid-cols-2" : participantCount <= 4 ? "grid-cols-3" : "grid-cols-4";
-
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-[#0e1423] w-[90%] md:w-[80%] h-[80vh] rounded-2xl border border-gray-700 shadow-2xl p-5 flex flex-col relative">
-        {/* Header */}
-        <div className="flex justify-between items-center border-b border-gray-800 pb-2 mb-4">
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
+      <div className="bg-[#0b1220] rounded-2xl w-[90%] max-w-6xl h-[85vh] flex flex-col border border-gray-700 shadow-2xl relative overflow-hidden">
+        <div className="flex justify-between items-center px-5 py-3 border-b border-gray-800 bg-[#111a2b]/70">
           <h2 className="text-violet-300 text-lg font-semibold flex items-center gap-2">
-            <Users size={18} /> Team Meeting Room
+            👥 Team Meeting Room
           </h2>
           <button onClick={onClose} className="text-gray-400 hover:text-white">
-            <X size={22} />
+            <X size={20} />
           </button>
         </div>
 
         {!joined ? (
-          <div className="flex justify-center items-center flex-1">
+          <div className="flex flex-1 items-center justify-center">
             <button
               onClick={join}
-              className="bg-violet-600 hover:bg-violet-700 px-6 py-3 rounded-xl text-white font-medium shadow-lg"
+              className="bg-violet-600 hover:bg-violet-700 text-white px-8 py-3 rounded-xl font-medium shadow-lg transition"
             >
               Join Meeting
             </button>
           </div>
         ) : (
           <>
-            {/* Video Grid */}
-            <div className={`grid ${gridCols} gap-4 flex-1 overflow-auto mb-4`}>
-              {/* Local Video */}
-              <div className="relative border border-gray-700 rounded-lg overflow-hidden">
-                <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-44 bg-black" />
-                <div className="absolute bottom-1 left-2 text-xs bg-black/50 px-2 rounded">You</div>
+            {/* 🎥 Video Grid */}
+            <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 p-5 overflow-y-auto bg-[#0b1220]/80">
+              {/* Local video */}
+              <div className="relative rounded-xl overflow-hidden border border-gray-700 bg-black shadow-md">
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="w-full h-48 object-cover rounded-xl"
+                />
+                <span className="absolute bottom-1 left-2 text-xs text-white bg-black/50 px-2 rounded">
+                  You
+                </span>
               </div>
 
-              {/* Remote Videos */}
-              {Object.entries(remoteStreams).map(([peerId, stream]) => (
-                <div key={peerId} className="relative border border-gray-700 rounded-lg overflow-hidden">
+              {/* Remote videos */}
+              {Object.entries(remoteStreams).map(([peerId]) => (
+                <div
+                  key={peerId}
+                  className="relative rounded-xl overflow-hidden border border-gray-700 bg-black shadow-md"
+                >
                   <video
+                    id={`remote-${peerId}`}
                     autoPlay
                     playsInline
-                    ref={(ref) => ref && (ref.srcObject = stream)}
-                    className="w-full h-44 bg-black"
+                    className="w-full h-48 object-cover rounded-xl"
                   />
-                  <div className="absolute bottom-1 left-2 text-xs bg-black/50 px-2 rounded">
+                  <span className="absolute bottom-1 left-2 text-xs text-white bg-black/50 px-2 rounded">
                     {peerId.slice(0, 6)}...
-                  </div>
+                  </span>
                 </div>
               ))}
             </div>
 
-            {/* Controls */}
-            <div className="flex justify-center gap-4 mt-auto">
+            {/* 🎛 Controls */}
+            <div className="flex justify-center items-center gap-6 py-4 border-t border-gray-800 bg-[#111a2b]/80">
               <button
                 onClick={toggleMic}
-                className={`p-3 rounded-full border ${
-                  muted ? "bg-red-600 border-red-700" : "bg-gray-700 border-gray-600"
+                className={`p-3 rounded-full transition ${
+                  muted ? "bg-red-600" : "bg-gray-700 hover:bg-gray-600"
                 }`}
               >
                 {muted ? <MicOff size={18} /> : <Mic size={18} />}
               </button>
               <button
                 onClick={toggleCam}
-                className={`p-3 rounded-full border ${
-                  camOff ? "bg-red-600 border-red-700" : "bg-gray-700 border-gray-600"
+                className={`p-3 rounded-full transition ${
+                  camOff ? "bg-red-600" : "bg-gray-700 hover:bg-gray-600"
                 }`}
               >
                 {camOff ? <VideoOff size={18} /> : <Video size={18} />}
               </button>
               <button
                 onClick={leaveMeeting}
-                className="p-3 rounded-full border bg-red-700 border-red-800 hover:bg-red-800 text-white"
+                className="p-3 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-lg"
               >
-                Leave
+                <PhoneOff size={18} />
               </button>
             </div>
           </>
