@@ -5,10 +5,10 @@ import API from "../api/api";
 import Sidebar from "../components/Sidebar";
 import Header from "../components/Header";
 import ChatBox from "../components/ChatBox";
-import MediasoupRoom from "../components/MediasoupRoom";
 import Scheduler from "../components/Scheduler";
 import toast, { Toaster } from "react-hot-toast";
 import CalendarModal from "../components/CalendarModal";
+import MeetingRoomModal from "../components/MeetingRoomModal"; // 🆕 video meeting modal
 
 export default function ChatPage({ token }) {
   const [socket, setSocket] = useState(null);
@@ -17,9 +17,10 @@ export default function ChatPage({ token }) {
   const [me, setMe] = useState(null);
   const [users, setUsers] = useState([]);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [showMeeting, setShowMeeting] = useState(false); // 🆕 toggle modal
 
   useEffect(() => {
-    // Decode JWT token to get user info
+    // Decode JWT token
     try {
       const payload = JSON.parse(atob(token.split(".")[1]));
       setMe({ id: payload.id || payload._id, name: payload.name, email: payload.email });
@@ -32,20 +33,16 @@ export default function ChatPage({ token }) {
 
     s.on("connect", () => console.log("✅ Socket connected"));
 
-    // 🗨️ Message receive
+    // 📩 Message handling
     s.on("message:receive", (msg) => {
       if (channel.type === "channel" && msg.channel === channel.id) setMessages((prev) => [...prev, msg]);
       if (channel.type === "dm" && msg.channel === channel.id) setMessages((prev) => [...prev, msg]);
     });
 
-    // 📅 Meeting scheduled notifications
+    // 📅 Meeting notifications
     s.on("meeting:scheduled", (data) => {
-      toast.success(`📅 ${data.title} scheduled at ${new Date(data.date).toLocaleString()}`, {
-        duration: 6000,
-      });
+      toast.success(`📅 ${data.title} scheduled at ${new Date(data.date).toLocaleString()}`, { duration: 6000 });
     });
-
-    // ⏰ 5-minute meeting reminder
     s.on("meeting:reminder", (data) => {
       toast(`⏰ Reminder: ${data.title} starts at ${new Date(data.date).toLocaleString()}`, {
         icon: "🔔",
@@ -53,17 +50,14 @@ export default function ChatPage({ token }) {
       });
     });
 
-    // Optional: Presence updates
-    s.on("presence:update", ({ userId, status }) => {
-      console.log(`Presence update: ${userId} is ${status}`);
-    });
+    s.on("presence:update", ({ userId, status }) => console.log(`Presence update: ${userId} is ${status}`));
 
     return () => s.disconnect();
     // eslint-disable-next-line
   }, []);
 
+  // Load messages for selected channel
   useEffect(() => {
-    // Load chat messages for selected channel
     async function load() {
       if (!channel) return;
       try {
@@ -76,8 +70,8 @@ export default function ChatPage({ token }) {
     load();
   }, [channel]);
 
+  // Load users
   useEffect(() => {
-    // Fetch all registered users
     async function fetchUsers() {
       try {
         const res = await API.get("/users");
@@ -90,7 +84,7 @@ export default function ChatPage({ token }) {
     fetchUsers();
   }, [me]);
 
-  // Handle navigation between sidebar tabs
+  // Navigation between chats / channels
   function handleNavigate(target) {
     if (target.type === "dm") {
       const a = String(me?.id);
@@ -106,11 +100,13 @@ export default function ChatPage({ token }) {
     }
   }
 
+  // Logout
   function onLogout() {
     localStorage.removeItem("token");
     window.location.href = "/login";
   }
 
+  // Send a message
   async function sendMessage(content) {
     if (!socket) return;
     const payload = { channel: channel.id, content, team: "default" };
@@ -118,40 +114,38 @@ export default function ChatPage({ token }) {
     setMessages((prev) => [...prev, { content, sender: { _id: me.id, name: me.name }, createdAt: new Date() }]);
   }
 
+  // Start meeting (open modal)
   function onStartMeeting() {
-    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+    setShowMeeting(true);
   }
 
   return (
     <div className="h-screen flex bg-[#0e1423] text-white">
       <Toaster position="top-right" />
       <Sidebar user={me} users={users} channel={channel} onNavigate={handleNavigate} />
+
       <div className="flex-1 flex flex-col">
         <Header
           title={`${channel.label || "# general"}`}
           onLogout={onLogout}
           onStartMeeting={onStartMeeting}
-          onViewSchedule={() => setShowCalendar(true)} // 👈 new prop for calendar button
+          onViewSchedule={() => setShowCalendar(true)}
         />
 
         <div className="flex-1 grid grid-cols-[1fr_360px]">
-          {/* 🗨️ Chat / Main section */}
+          {/* 💬 Chat Section */}
           <main className="p-6">
             <div className="h-[calc(100vh-170px)] rounded-2xl overflow-hidden shadow-xl bg-[#141d33]">
               <ChatBox messages={messages} onSend={sendMessage} me={me} />
             </div>
-
-            <div className="mt-6">
-              <MediasoupRoom socket={socket} me={me} roomId={"main_room"} />
-            </div>
           </main>
 
-          {/* 📅 Scheduler Sidebar */}
+          {/* 📅 Sidebar Section */}
           <aside className="p-6 border-l border-gray-800 bg-[#111a2b]">
             <Scheduler token={token} />
             <div className="mt-8">
               <h4 className="text-sm font-semibold text-gray-300 mb-2">Participants</h4>
-              <div className="text-sm text-gray-400">Open the room to show participants here</div>
+              <div className="text-sm text-gray-400">Open a room to show participants here</div>
             </div>
           </aside>
         </div>
@@ -159,6 +153,15 @@ export default function ChatPage({ token }) {
 
       {/* 📆 Calendar Modal */}
       {showCalendar && <CalendarModal onClose={() => setShowCalendar(false)} />}
+
+      {/* 🎥 Meeting Modal */}
+      {showMeeting && (
+        <MeetingRoomModal
+          socket={socket}
+          me={me}
+          onClose={() => setShowMeeting(false)}
+        />
+      )}
     </div>
   );
 }

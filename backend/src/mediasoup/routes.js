@@ -81,4 +81,46 @@ router.get('/rooms/:roomId/producer/:producerId/rtpParameters', async (req, res)
   res.json({ producerId, kind: p.producer.kind });
 });
 
+// Consume route — allows a peer to receive another user's video/audio
+router.post('/rooms/:roomId/consume', async (req, res) => {
+  const { roomId } = req.params;
+  const { transportId, producerId, rtpCapabilities, peerId } = req.body;
+
+  const room = getRoom(roomId);
+  if (!room) return res.status(404).json({ error: 'room not found' });
+
+  const transport = room.transports.get(transportId);
+  if (!transport) return res.status(404).json({ error: 'transport not found' });
+
+  if (!room.router.canConsume({ producerId, rtpCapabilities })) {
+    return res.status(400).json({ error: 'Cannot consume this producer' });
+  }
+
+  try {
+    const consumer = await transport.consume({
+      producerId,
+      rtpCapabilities,
+      paused: false,
+    });
+
+    // Keep track of consumer
+    const peer = room.peers.get(peerId) || { consumers: new Set() };
+    peer.consumers.add(consumer.id);
+    room.peers.set(peerId, peer);
+    room.consumers = room.consumers || new Map();
+    room.consumers.set(consumer.id, consumer);
+
+    res.json({
+      id: consumer.id,
+      producerId,
+      kind: consumer.kind,
+      rtpParameters: consumer.rtpParameters,
+    });
+  } catch (err) {
+    console.error('❌ Error creating consumer:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 module.exports = router;
